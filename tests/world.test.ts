@@ -72,6 +72,45 @@ describe("seed-based terrain", () => {
   });
 });
 describe("chunk edits", () => {
+  it("removes block state before broadcasting removal so broken doors leave no stale rotation", () => {
+    const w = new World("states");
+    w.set(0, 75, 0, 58);
+    w.states["0,75,0"] = { rotation: 3 };
+    w.events.subscribe(() => expect(w.states["0,75,0"]).toBeUndefined());
+    expect(w.set(0, 75, 0, 0)).toBe(true);
+    expect(w.states["0,75,0"]).toBeUndefined();
+    w.dispose();
+  });
+  it("indexes changes by chunk without scanning all edits and replaces only one chunk snapshot", () => {
+    const w = new World("index");
+    w.restore([
+      { x: -1, y: 75, z: 0, id: 9 },
+      { x: 16, y: 75, z: 0, id: 3 },
+    ]);
+    vi.spyOn(w.changes, "values").mockImplementation(() => {
+      throw Error("Global scan");
+    });
+    expect(w.get(-1, 75, 0)).toBe(9);
+    expect([...w.chunkChanges(1, 0)]).toEqual([{ x: 16, y: 75, z: 0, id: 3 }]);
+    w.replaceChunkChanges(-1, 0, [{ x: -2, y: 75, z: 0, id: 18 }]);
+    expect(w.changes.has("-1,75,0")).toBe(false);
+    expect(w.get(-2, 75, 0)).toBe(18);
+    expect(w.get(16, 75, 0)).toBe(3);
+    w.dispose();
+  });
+  it("updates already loaded chunks during restore and refuses invalid coordinates without generation", () => {
+    const w = new World("restore");
+    w.ensure(0, 0);
+    w.restore([{ x: 1, y: 75, z: 1, id: 18 }]);
+    expect(w.get(1, 75, 1)).toBe(18);
+    const generate = vi.spyOn(w.generator, "generate");
+    expect(w.get(NaN, 1, 1)).toBe(0);
+    expect(w.get(Infinity, 1, 1)).toBe(0);
+    expect(w.set(NaN, 75, 1, 3)).toBe(false);
+    expect(() => w.ensure(Infinity, 0)).toThrow();
+    expect(generate).not.toHaveBeenCalled();
+    w.dispose();
+  });
   it("marks both sides of positive and negative chunk boundaries dirty", () => {
     const w = new World("test");
     w.set(16, 60, 2, 9);

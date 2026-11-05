@@ -536,7 +536,7 @@ export class Game {
     }
     this.show(
       "menu",
-      `<div class="menu-layout"><section class="intro"><div class="eyebrow"><span class="square"></span> EEN WERELD OM TE MAKEN</div><h1 class="logo">WHITE<br><span>BRICK</span><i>✦</i></h1><p>Voorbij de horizon.<br>Helemaal van jou.</p><div class="edition">SANDBOX EDITION <span>CREATIVE + SURVIVAL</span></div></section><section class="menu-card"><div class="eyebrow">JOUW VOLGENDE AVONTUUR</div><h2>Begin met een blok.</h2><p>Een verse wereld. Eindeloze mogelijkheden.</p><button id="new" class="primary"><span>Nieuwe wereld</span><span>↗</span></button><button id="load">Mijn werelden <span>→</span></button><button id="settings">Instellingen <span>⚙</span></button><div class="menu-note"><span class="live-dot"></span> Singleplayer · Lokaal opgeslagen</div></section></div><footer><span>WHITEBRICK <b>v0.6</b></span><span>Originele wereld. Originele textures. Jouw ideeën.</span><span>DESKTOP / WEBGL</span></footer>`,
+      `<div class="menu-layout"><section class="intro"><div class="eyebrow"><span class="square"></span> EEN WERELD OM TE MAKEN</div><h1 class="logo">WHITE<br><span>BRICK</span><i>✦</i></h1><p>Voorbij de horizon.<br>Helemaal van jou.</p><div class="edition">SANDBOX EDITION <span>CREATIVE + SURVIVAL</span></div></section><section class="menu-card"><div class="eyebrow">JOUW VOLGENDE AVONTUUR</div><h2>Begin met een blok.</h2><p>Een verse wereld. Eindeloze mogelijkheden.</p><button id="new" class="primary"><span>Nieuwe wereld</span><span>↗</span></button><button id="load">Mijn werelden <span>→</span></button><button id="settings">Instellingen <span>⚙</span></button><div class="menu-note"><span class="live-dot"></span> Singleplayer · Lokaal opgeslagen</div></section></div><footer><span>WHITEBRICK <b>v0.6.1</b></span><span>Originele wereld. Originele textures. Jouw ideeën.</span><span>DESKTOP / WEBGL</span></footer>`,
     );
     this.button("#new", () => this.createMenu());
     this.button("#load", () => void this.worldMenu());
@@ -633,14 +633,13 @@ export class Game {
           ),
         );
         this.button("#back", () => this.menu());
-        void session.network
-          .connect()
-          .catch((error) =>
-            this.connectionLost(
-              error instanceof Error ? error.message : "Verbinding mislukt.",
-              false,
-            ),
+        void session.network.connect().catch((error) => {
+          if (this.multiplayer !== session) return;
+          this.connectionLost(
+            error instanceof Error ? error.message : "Verbinding mislukt.",
+            false,
           );
+        });
       };
     } catch (error) {
       if (this.screen === "multiplayer")
@@ -769,16 +768,16 @@ export class Game {
       this.projectiles.render();
       if (message.containers) this.blockEntities.restore(message.containers);
     } else if (message.type === "chunk") {
+      if (message.revision < (session.revisions.get(message.key) ?? -1)) return;
       const [cx, cz] = message.key.split(",").map(Number);
-      for (const [key, c] of this.world.changes)
-        if (Math.floor(c.x / 16) === cx && Math.floor(c.z / 16) === cz)
-          this.world.changes.delete(key);
       for (const key of Object.keys(this.world.states)) {
         const [x, , z] = key.split(",").map(Number);
         if (Math.floor(x / 16) === cx && Math.floor(z / 16) === cz)
           delete this.world.states[key];
       }
-      this.world.restore(
+      this.world.replaceChunkChanges(
+        cx,
+        cz,
         message.changes.map(([x, y, z, id]) => ({
           x: x + cx * 16,
           y,
@@ -1435,6 +1434,7 @@ export class Game {
     }
     if (!this.saveData) return;
     if (this.saving) await this.saving;
+    if (!this.saveData || this.multiplayer) return;
     const snapshot: WorldSave = {
       ...this.saveData,
       rules: { ...(this.saveData.rules ?? DEFAULT_RULES) },
@@ -2091,7 +2091,15 @@ export class Game {
       }
     });
     window.addEventListener("pagehide", () => {
+      this.multiplayer?.close();
       if (this.saveData) void this.save().catch(() => {});
+    });
+    window.addEventListener("pageshow", (e) => {
+      if (e.persisted && this.multiplayer)
+        this.connectionLost(
+          "De verbinding is gesloten bij het verlaten van de pagina. Keer terug naar het hoofdmenu om opnieuw te joinen.",
+          false,
+        );
     });
   }
   private resize() {
@@ -2121,6 +2129,7 @@ export class Game {
     needed.sort((a, b) => a.d - b.d);
     const next = needed[0];
     if (next) {
+      let ready = true;
       if (typeof Worker !== "undefined" && !this.world.workerFailed) {
         const coords = [
           [next.cx, next.cz],
@@ -2129,21 +2138,21 @@ export class Game {
           [next.cx, next.cz - 1],
           [next.cx, next.cz + 1],
         ];
-        let ready = true;
         for (const [x, z] of coords)
           if (!this.world.chunks.has(this.world.key(x, z))) {
             this.world.prefetch(x, z);
             ready = false;
           }
-        if (!ready) return;
       }
-      const key = this.world.key(next.cx, next.cz);
-      const old = this.meshes.get(key);
-      if (old) disposeChunk(old);
-      const mesh = meshChunk(this.world, next.cx, next.cz, this.materials);
-      this.meshes.set(key, mesh);
-      this.scene.add(mesh);
-      this.world.dirty.delete(key);
+      if (ready) {
+        const key = this.world.key(next.cx, next.cz);
+        const old = this.meshes.get(key);
+        if (old) disposeChunk(old);
+        const mesh = meshChunk(this.world, next.cx, next.cz, this.materials);
+        this.meshes.set(key, mesh);
+        this.scene.add(mesh);
+        this.world.dirty.delete(key);
+      }
     }
     for (const [key, mesh] of this.meshes) {
       const [x, z] = key.split(",").map(Number);
@@ -2158,6 +2167,11 @@ export class Game {
         this.world.chunks.delete(key);
         this.world.dirty.delete(key);
       }
+    }
+    for (const key of this.world.dirty) {
+      const [x, z] = key.split(",").map(Number);
+      if (Math.abs(x - cx) > r + 2 || Math.abs(z - cz) > r + 2)
+        this.world.dirty.delete(key);
     }
     const fog = this.scene.fog as THREE.Fog;
     fog.near = r * 16 * 0.55;
@@ -2602,7 +2616,7 @@ export class Game {
     this.renderer.render(this.scene, this.camera);
     if (this.showDebug) {
       const p = this.player.position;
-      this.debug.textContent = `WHITEBRICK 0.6 / ${this.multiplayer ? "LAN · " + Math.round(this.multiplayer.network.ping) + " ms · server " + this.networkTickMs.toFixed(1) + " ms · players " + this.remotePlayers.count : "Singleplayer"}\n${Math.round(this.fps)} FPS · ${this.renderer.info.render.calls} draw calls\nXYZ ${p.x.toFixed(2)} / ${p.y.toFixed(2)} / ${p.z.toFixed(2)}\nLook ${this.input.yaw.toFixed(4)} / ${this.input.pitch.toFixed(4)}\nChunks ${this.meshes.size} · cache ${this.world.chunks.size}\nBiome ${this.world.generator.biome(p.x, p.z)}\nSeed ${this.world.seed}\n${this.player.flying ? "Vliegen" : this.player.grounded ? "Op de grond" : "In de lucht"}`;
+      this.debug.textContent = `WHITEBRICK 0.6.1 / ${this.multiplayer ? "LAN · " + Math.round(this.multiplayer.network.ping) + " ms · server " + this.networkTickMs.toFixed(1) + " ms · players " + this.remotePlayers.count : "Singleplayer"}\n${Math.round(this.fps)} FPS · ${this.renderer.info.render.calls} draw calls\nXYZ ${p.x.toFixed(2)} / ${p.y.toFixed(2)} / ${p.z.toFixed(2)}\nLook ${this.input.yaw.toFixed(4)} / ${this.input.pitch.toFixed(4)}\nChunks ${this.meshes.size} · cache ${this.world.chunks.size}\nBiome ${this.world.generator.biome(p.x, p.z)}\nSeed ${this.world.seed}\n${this.player.flying ? "Vliegen" : this.player.grounded ? "Op de grond" : "In de lucht"}`;
     }
   };
 }

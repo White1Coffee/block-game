@@ -91,6 +91,8 @@ Er is alleen de bestaande Overworld: Nether/End, redstone, trading en transports
 
 ## Besturing
 
+De stabiliteitsreparaties en testverantwoording voor 0.6.1 staan in [STABILITY-0.6.1.md](STABILITY-0.6.1.md).
+
 | Input | Actie |
 |---|---|
 | WASD / muis | Bewegen / kijken |

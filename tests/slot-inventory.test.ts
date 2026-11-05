@@ -21,6 +21,24 @@ const total = (s: Survival, c?: InventoryContext) =>
     0,
   );
 describe("physical player inventory", () => {
+  it("rejects non-fuel in the furnace fuel slot without consuming or moving the cursor stack", () => {
+    const s = new Survival(),
+      entities = new BlockEntities();
+    s.add(3, 8);
+    inventoryAction(s, click("inventory", 0), base());
+    const context = inventoryContext(
+      s,
+      false,
+      { kind: "furnace", key: "0,1,0" },
+      entities,
+      () => {},
+    );
+    expect(() => inventoryAction(s, click("container", 1), context)).toThrow(
+      "Dit item mag niet in dit vak.",
+    );
+    expect(context.container?.[1]).toBeNull();
+    expect(s.getInventory().state.cursor).toEqual({ id: 3, count: 8 });
+  });
   it("puts a picked creative item into exactly the chosen slot without changing the selected hotbar slot", () => {
     const s = new Survival();
     s.selectedSlot = 2;

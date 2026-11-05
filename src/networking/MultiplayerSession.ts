@@ -45,8 +45,9 @@ export class MultiplayerSession {
     this.accumulator = Math.min(0.2, this.accumulator + dt);
     while (this.accumulator >= STEP) {
       this.accumulator -= STEP;
+      if (this.pending.length >= 100) break;
       const packet: MovementInput = {
-        seq: ++this.seq,
+        seq: this.seq + 1,
         keys: [...input.keys].filter((key) =>
           [
             "KeyW",
@@ -64,10 +65,10 @@ export class MultiplayerSession {
         pitch: input.pitch,
         flying: player.flying,
       };
+      if (!this.network.send({ type: "input", input: packet })) break;
+      this.seq = packet.seq;
       input.update(player, STEP);
       this.pending.push(packet);
-      if (this.pending.length > 100) this.pending.shift();
-      this.network.send({ type: "input", input: packet });
     }
     const target = player.position
       .clone()

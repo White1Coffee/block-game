@@ -18,6 +18,20 @@ function profile(
   };
 }
 describe("public skin proxy", () => {
+  it("reports an unreachable upstream clearly and still allows later retries", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new TypeError("fetch failed")),
+    );
+    await expect(lookupSkin("OfflineFixture")).rejects.toMatchObject({
+      status: 502,
+      message: expect.stringContaining("PNG-upload blijft beschikbaar"),
+    });
+    await expect(lookupSkin("OfflineFixture")).rejects.toMatchObject({
+      status: 502,
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
   it("rejects invalid usernames without network requests", async () => {
     const fetch = vi.fn();
     vi.stubGlobal("fetch", fetch);

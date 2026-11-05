@@ -22,6 +22,7 @@ export class GameServer {
   private closing = false;
   private timer?: ReturnType<typeof setInterval>;
   private heartbeat?: ReturnType<typeof setInterval>;
+  private inflight = new Set<Promise<void>>();
   private clients = new Map<
     WebSocket,
     {
@@ -32,6 +33,8 @@ export class GameServer {
       chat: number;
       skin: number;
       joining: boolean;
+      queue: Promise<void>;
+      pending: number;
     }
   >();
   private upgrades = new Map<string, { time: number; count: number }>();
@@ -50,13 +53,7 @@ export class GameServer {
     root?: string,
     hostAddressCheck = isHostAddress,
   ) {
-    const game = await ServerWorld.open(config, root);
-    try {
-      await game.persistence.acquireLock();
-    } catch (e) {
-      game.dispose();
-      throw e;
-    }
+    const game = await ServerWorld.open(config, root, true);
     return new GameServer(
       game,
       config,
@@ -66,8 +63,16 @@ export class GameServer {
   }
   attach(http: Server) {
     http.on("upgrade", (req, socket, head) => {
-      if (new URL(req.url ?? "/", "http://host").pathname !== "/ws/whitebrick")
+      try {
+        if (
+          new URL(req.url ?? "/", "http://host").pathname !== "/ws/whitebrick"
+        ) {
+          return;
+        }
+      } catch {
+        socket.destroy();
         return;
+      }
       const origin = req.headers.origin;
       let originAllowed = true;
       try {
@@ -135,6 +140,8 @@ export class GameServer {
       chat: -Infinity,
       skin: -Infinity,
       joining: false,
+      queue: Promise.resolve(),
+      pending: 0,
     };
     this.clients.set(ws, c);
     const deadline = setTimeout(() => {
@@ -145,90 +152,118 @@ export class GameServer {
       c.alive = true;
     });
     ws.on("message", (raw, binary) => {
-      void (async () => {
-        try {
-          if (this.closing) return;
-          if (binary) throw Error("Alleen JSON-berichten zijn toegestaan.");
-          const now = performance.now();
-          c.tokens = Math.min(150, c.tokens + (now - c.last) * 0.1);
-          c.last = now;
-          if (--c.tokens < 0) {
-            ws.close(1008, "Te veel berichten.");
-            return;
-          }
-          const m = validateClientMessage(JSON.parse(raw.toString()));
-          if (m.type === "hello") {
-            if (c.player || c.joining) throw Error("Al aangemeld.");
-            if (
-              m.protocol !== PROTOCOL_VERSION ||
-              m.generator !== GENERATOR_VERSION
-            )
-              throw Error("Client/serverversie verschilt. Herlaad de game.");
-            c.joining = true;
-            try {
-              const joined = this.game.join(m.name, m.token, (message) => {
-                if (!c.joining) this.send(ws, message);
-              });
-              c.player = joined.player;
-              c.player.hostAdmin = this.hostAddressCheck(remoteAddress);
-              await this.game.save();
-              if (ws.readyState !== WebSocket.OPEN) return;
-              this.send(ws, {
-                type: "welcome",
-                token: joined.token,
-                sessionId: c.player.sessionId,
-                serverId: this.game.serverId,
-                viewDistance: this.config.viewDistance,
-                world: this.game.welcomeWorld(),
-                self: this.game.self(c.player),
-              });
-              c.player.chunks.clear();
-              c.joining = false;
-              if (c.player.hostAdmin)
-                c.player.send({
+      if (this.closing || ws.readyState !== WebSocket.OPEN) return;
+      const now = performance.now();
+      c.tokens = Math.min(150, c.tokens + (now - c.last) * 0.1);
+      c.last = now;
+      if (--c.tokens < 0 || c.pending >= 150) {
+        ws.close(1008, "Te veel berichten.");
+        return;
+      }
+      c.pending++;
+      const job = c.queue
+        .then(async () => {
+          try {
+            if (this.closing || ws.readyState !== WebSocket.OPEN) return;
+            if (binary) throw Error("Alleen JSON-berichten zijn toegestaan.");
+            const m = validateClientMessage(JSON.parse(raw.toString()));
+            if (m.type === "hello") {
+              if (c.player || c.joining) throw Error("Al aangemeld.");
+              if (
+                m.protocol !== PROTOCOL_VERSION ||
+                m.generator !== GENERATOR_VERSION
+              )
+                throw Error("Client/serverversie verschilt. Herlaad de game.");
+              c.joining = true;
+              try {
+                const joined = this.game.join(m.name, m.token, (message) => {
+                  if (!c.joining) this.send(ws, message);
+                });
+                c.player = joined.player;
+                c.player.hostAdmin = this.hostAddressCheck(remoteAddress);
+                await this.game.save();
+                if (
+                  this.closing ||
+                  ws.readyState !== WebSocket.OPEN ||
+                  this.game.players.get(c.player.record.id) !== c.player
+                )
+                  return;
+                this.send(ws, {
+                  type: "welcome",
+                  token: joined.token,
+                  sessionId: c.player.sessionId,
+                  serverId: this.game.serverId,
+                  viewDistance: this.config.viewDistance,
+                  world: this.game.welcomeWorld(),
+                  self: this.game.self(c.player),
+                });
+                c.player.chunks.clear();
+                c.joining = false;
+                if (c.player.hostAdmin)
+                  c.player.send({
+                    type: "chat",
+                    kind: "system",
+                    text: "Je speelt op de servercomputer en bent automatisch Admin.",
+                  });
+                this.game.broadcast({
                   type: "chat",
                   kind: "system",
-                  text: "Je speelt op de servercomputer en bent automatisch Admin.",
+                  text: c.player.record.name + " is verbonden.",
                 });
-              this.game.broadcast({
-                type: "chat",
-                kind: "system",
-                text: c.player.record.name + " is verbonden.",
-              });
-              console.log(
-                `Join: ${c.player.record.name} | ${c.player.record.id} | ${this.game.players.size}/${this.config.maxPlayers}`,
-              );
-            } finally {
-              c.joining = false;
+                console.log(
+                  `Join: ${c.player.record.name} | ${c.player.record.id} | ${this.game.players.size}/${this.config.maxPlayers}`,
+                );
+              } catch (error) {
+                if (
+                  c.player &&
+                  this.game.players.get(c.player.record.id) === c.player
+                )
+                  this.game.leave(c.player.record.id);
+                c.player = undefined;
+                throw error;
+              } finally {
+                c.joining = false;
+              }
+              return;
             }
-            return;
+            if (!c.player || c.joining) throw Error("Meld je eerst aan.");
+            if (m.type === "skin") {
+              if (now - c.skin < 2000) return;
+              c.skin = now;
+              const player = c.player;
+              const hash = await this.skins.store(m.png);
+              if (
+                !this.closing &&
+                ws.readyState === WebSocket.OPEN &&
+                this.game.players.get(player.record.id) === player
+              )
+                player.record.skin = { hash, model: m.model, layers: m.layers };
+              return;
+            }
+            if (m.type === "chat") {
+              if (now - c.chat < 350)
+                throw Error("Wacht even voor het volgende bericht.");
+              c.chat = now;
+            }
+            this.game.handle(c.player, m);
+          } catch (e) {
+            const message =
+              e instanceof Error ? e.message : "Netwerkbericht geweigerd.";
+            this.send(ws, { type: "error", message, fatal: !c.player });
+            if (!c.player) ws.close(1008, "Aanmelding geweigerd.");
           }
-          if (!c.player || c.joining) throw Error("Meld je eerst aan.");
-          if (m.type === "skin") {
-            if (now - c.skin < 2000) return;
-            c.skin = now;
-            const hash = await this.skins.store(m.png);
-            c.player.record.skin = { hash, model: m.model, layers: m.layers };
-            return;
-          }
-          if (m.type === "chat") {
-            if (now - c.chat < 350)
-              throw Error("Wacht even voor het volgende bericht.");
-            c.chat = now;
-          }
-          this.game.handle(c.player, m);
-        } catch (e) {
-          const message =
-            e instanceof Error ? e.message : "Netwerkbericht geweigerd.";
-          this.send(ws, { type: "error", message, fatal: !c.player });
-          if (!c.player) ws.close(1008, "Aanmelding geweigerd.");
-        }
-      })();
+        })
+        .finally(() => {
+          c.pending--;
+          this.inflight.delete(job);
+        });
+      c.queue = job;
+      this.inflight.add(job);
     });
     ws.on("close", () => {
       clearTimeout(deadline);
       this.clients.delete(ws);
-      if (c.player) {
+      if (c.player && this.game.players.get(c.player.record.id) === c.player) {
         this.game.leave(c.player.record.id);
         if (!this.closing)
           void this.game
@@ -310,6 +345,7 @@ export class GameServer {
       this.closing = true;
       clearInterval(this.timer);
       clearInterval(this.heartbeat);
+      await Promise.allSettled([...this.inflight]);
       this.game.broadcast({
         type: "shutdown",
         message: "De host stopt de server. Wereld wordt opgeslagen.",

@@ -15,7 +15,9 @@ export class SkinSyncManager {
         skin ? `/api/multiplayer/skins/${skin.hash}.png` : defaultSkin().png,
       ).then(skinTexture);
       this.cache.set(key, result);
-      result.catch(() => this.cache.delete(key));
+      result.catch(() => {
+        if (this.cache.get(key) === result) this.cache.delete(key);
+      });
     }
     return result;
   }

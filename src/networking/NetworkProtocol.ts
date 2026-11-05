@@ -171,6 +171,9 @@ function integer(v: unknown, min: number, max: number) {
 function text(v: unknown, max: number) {
   return typeof v === "string" && v.length <= max;
 }
+function transaction(v: unknown) {
+  return typeof v === "string" && /^[A-Za-z0-9:_-]{1,80}$/.test(v);
+}
 function key(v: unknown) {
   return typeof v === "string" && /^-?\d{1,8},\d{1,3},-?\d{1,8}$/.test(v);
 }
@@ -184,7 +187,7 @@ export function validateClientMessage(value: unknown): ClientMessage {
       const a = v.action,
         areas = ["inventory", "craft", "container", "output"];
       valid =
-        text(v.tx, 80) &&
+        transaction(v.tx) &&
         object(a) &&
         (a.kind === "close" ||
           (a.kind === "distribute" &&
@@ -249,7 +252,7 @@ export function validateClientMessage(value: unknown): ClientMessage {
     }
     case "action":
       valid =
-        text(v.tx, 80) &&
+        transaction(v.tx) &&
         typeof v.action === "string" &&
         [
           "stop",
@@ -270,7 +273,7 @@ export function validateClientMessage(value: unknown): ClientMessage {
       break;
     case "craft":
       valid =
-        text(v.tx, 80) &&
+        transaction(v.tx) &&
         (v.size === 2 || v.size === 3) &&
         Array.isArray(v.grid) &&
         v.grid.length === Number(v.size) ** 2 &&
@@ -280,7 +283,7 @@ export function validateClientMessage(value: unknown): ClientMessage {
       break;
     case "container":
       valid =
-        text(v.tx, 80) &&
+        transaction(v.tx) &&
         key(v.key) &&
         integer(v.slot, 0, 26) &&
         integer(v.item, 0, 1000) &&

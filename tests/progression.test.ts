@@ -5,6 +5,23 @@ import { DropSystem } from "../src/inventory/DropSystem";
 import { Projectiles } from "../src/entities/Projectiles";
 import { Scene, Vector3 } from "three";
 describe("progression and entity safety", () => {
+  it("never merges different stack metadata through a legacy chest transfer", async () => {
+    const { BlockEntities } = await import("../src/world/BlockEntities");
+    const s = new Survival(),
+      entities = new BlockEntities(),
+      slots = entities.chest("0,1,0");
+    s.addStack({ id: 3, count: 8, enchantments: { efficiency: 1 } });
+    slots[0] = { id: 3, count: 8, enchantments: { efficiency: 2 } };
+    expect(entities.transferTo(s, slots, 0, 3, 4)).toBe(false);
+    expect(s.count(3)).toBe(8);
+    expect(slots[0]).toEqual({
+      id: 3,
+      count: 8,
+      enchantments: { efficiency: 2 },
+    });
+    expect(entities.transferTo(s, slots, -1, 3, 4)).toBe(false);
+    expect(entities.transferTo(s, slots, 1, 3, 9)).toBe(false);
+  });
   it("does not multiply unstackable items when restoring older drop stacks", () => {
     const drops = new DropSystem(new Scene());
     drops.restore([

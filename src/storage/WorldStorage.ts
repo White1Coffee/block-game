@@ -71,6 +71,7 @@ export class WorldStorage {
     });
   }
   async save(save: WorldSave) {
+    save = structuredClone(save);
     const db = await this.open();
     return new Promise<void>((resolve, reject) => {
       const tx = db.transaction("worlds", "readwrite");
@@ -137,6 +138,8 @@ export class WorldStorage {
       };
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
+      tx.onabort = () =>
+        reject(tx.error ?? new Error("Verwijderen afgebroken."));
     });
   }
   async export(id: string, backup = false): Promise<string> {

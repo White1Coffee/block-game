@@ -12,6 +12,7 @@ export class World {
   readonly generator: WorldGenerator;
   readonly chunks = new Map<string, Uint8Array>();
   readonly changes = new Map<string, BlockChange>();
+  private changesByChunk = new Map<string, Map<string, BlockChange>>();
   readonly dirty = new Set<string>();
   states: Record<
     string,
@@ -61,9 +62,8 @@ export class World {
         if (this.chunks.has(data.key)) return;
         const [x, z] = data.key.split(",").map(Number);
         const chunk = data.blocks as Uint8Array;
-        for (const c of this.changes.values())
-          if (Math.floor(c.x / 16) === x && Math.floor(c.z / 16) === z)
-            chunk[c.x - x * 16 + (c.z - z * 16) * 16 + c.y * 256] = c.id;
+        for (const c of this.chunkChanges(x, z))
+          chunk[c.x - x * 16 + (c.z - z * 16) * 16 + c.y * 256] = c.id;
         this.chunks.set(data.key, chunk);
       };
       this.worker.onerror = () => {
@@ -88,24 +88,30 @@ export class World {
     this.worker = undefined;
     this.pending.clear();
     this.chunks.clear();
+    this.changes.clear();
+    this.changesByChunk.clear();
+    this.dirty.clear();
+    this.states = {};
     this.events.clear();
   }
   key(cx: number, cz: number) {
     return `${cx},${cz}`;
   }
   ensure(cx: number, cz: number) {
+    if (!Number.isSafeInteger(cx) || !Number.isSafeInteger(cz))
+      throw Error("Ongeldige chunkcoördinaten.");
     const key = this.key(cx, cz);
     let data = this.chunks.get(key);
     if (!data) {
       data = this.generator.generate(cx, cz);
-      for (const c of this.changes.values())
-        if (Math.floor(c.x / 16) === cx && Math.floor(c.z / 16) === cz)
-          data[c.x - cx * 16 + (c.z - cz * 16) * 16 + c.y * 256] = c.id;
+      for (const c of this.chunkChanges(cx, cz))
+        data[c.x - cx * 16 + (c.z - cz * 16) * 16 + c.y * 256] = c.id;
       this.chunks.set(key, data);
     }
     return data;
   }
   get(x: number, y: number, z: number): number {
+    if (![x, y, z].every(Number.isFinite)) return 0;
     x = Math.floor(x);
     y = Math.floor(y);
     z = Math.floor(z);
@@ -119,6 +125,7 @@ export class World {
     return block(this.get(x, y, z)).solid;
   }
   set(x: number, y: number, z: number, id: number) {
+    if (![x, y, z].every(Number.isFinite)) return false;
     if (y < 1 || y >= this.height || !Number.isInteger(id) || !blocks[id])
       return false;
     x = Math.floor(x);
@@ -129,7 +136,8 @@ export class World {
     if (this.get(x, y, z) === id) return false;
     this.ensure(cx, cz)[x - cx * 16 + (z - cz * 16) * 16 + y * 256] = id;
     const change = { x, y, z, id };
-    this.changes.set(`${x},${y},${z}`, change);
+    if (id === 0) delete this.states[`${x},${y},${z}`];
+    this.recordChange(change);
     this.dirty.add(this.key(cx, cz));
     if (x % 16 === 0) this.dirty.add(this.key(cx - 1, cz));
     if (((x % 16) + 16) % 16 === 15) this.dirty.add(this.key(cx + 1, cz));
@@ -150,7 +158,32 @@ export class World {
         c.id >= 0 &&
         Number.isInteger(c.id) &&
         !!blocks[c.id]
-      )
-        this.changes.set(`${c.x},${c.y},${c.z}`, c);
+      ) {
+        this.recordChange(c);
+        const cx = Math.floor(c.x / 16),
+          cz = Math.floor(c.z / 16),
+          data = this.chunks.get(this.key(cx, cz));
+        if (data) data[c.x - cx * 16 + (c.z - cz * 16) * 16 + c.y * 256] = c.id;
+      }
+  }
+  chunkChanges(cx: number, cz: number): Iterable<BlockChange> {
+    return this.changesByChunk.get(this.key(cx, cz))?.values() ?? [];
+  }
+  replaceChunkChanges(cx: number, cz: number, changes: BlockChange[]) {
+    const key = this.key(cx, cz);
+    for (const entry of this.changesByChunk.get(key)?.keys() ?? [])
+      this.changes.delete(entry);
+    this.changesByChunk.delete(key);
+    this.chunks.delete(key);
+    this.restore(changes);
+  }
+  private recordChange(change: BlockChange) {
+    const key = this.key(Math.floor(change.x / 16), Math.floor(change.z / 16)),
+      position = `${change.x},${change.y},${change.z}`;
+    let entries = this.changesByChunk.get(key);
+    if (!entries) this.changesByChunk.set(key, (entries = new Map()));
+    const copy = { ...change };
+    entries.set(position, copy);
+    this.changes.set(position, copy);
   }
 }

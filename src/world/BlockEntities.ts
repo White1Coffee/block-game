@@ -1,6 +1,7 @@
 import type { World } from "./World";
 import type { Survival } from "../inventory/Survival";
 import { tools, stackLimit } from "../inventory/ItemRegistry";
+import { compatible } from "../inventory/SlotInventory";
 export interface Stack {
   id: number;
   count: number;
@@ -51,6 +52,7 @@ const fuels: Record<number, number> = {
   69: 15,
   70: 15,
 };
+export const isFuel = (id: number) => !!fuels[id];
 export class BlockEntities {
   private cropClock = 0;
   data: BlockEntitySave = { chests: {}, furnaces: {}, crops: {} };
@@ -80,7 +82,15 @@ export class BlockEntities {
     id: number,
     count = 1,
   ) {
-    if (!s.count(id) || count <= 0) return false;
+    if (
+      !Number.isInteger(index) ||
+      index < 0 ||
+      index >= slots.length ||
+      !s.count(id) ||
+      !Number.isSafeInteger(count) ||
+      count <= 0
+    )
+      return false;
     const slot = slots[index];
     const model = s.getInventory(),
       source =
@@ -90,7 +100,9 @@ export class BlockEntities {
       durability = source?.durability,
       enchantments = source?.enchantments;
     if (
-      (slot && slot.id !== id) ||
+      !source ||
+      count > source.count ||
+      (slot && !compatible(slot, source)) ||
       (slot?.count ?? 0) + count > stackLimit(id) ||
       !s.consume(id, count)
     )

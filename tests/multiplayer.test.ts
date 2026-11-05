@@ -1,4 +1,4 @@
-import { beforeEach, afterEach, describe, it, expect } from "vitest";
+import { beforeEach, afterEach, describe, it, expect, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -22,6 +22,7 @@ import {
 import { GENERATOR_VERSION } from "../src/world/WorldGenerator";
 import { configureGameMode } from "../src/player/GameModes";
 import { isHostAddress } from "../server/HostAddress";
+import { validateServerMessage } from "../src/networking/ServerValidation";
 class Client {
   readonly ws: WebSocket;
   messages: ServerMessage[] = [];
@@ -148,6 +149,66 @@ describe("server-authoritative LAN protocol", () => {
     clients.push(c);
     return c;
   };
+  it("serializes login and following messages while the login save is pending", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r)),
+      save = runtime.game.save.bind(runtime.game);
+    vi.spyOn(runtime.game, "save").mockImplementationOnce(async () => {
+      await gate;
+      await save();
+    });
+    const c = connect();
+    await c.open();
+    c.send({
+      type: "hello",
+      protocol: PROTOCOL_VERSION,
+      generator: GENERATOR_VERSION,
+      name: "Queued",
+    });
+    c.send({ type: "ping", time: 123 });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(c.messages.some((m) => m.type === "pong")).toBe(false);
+    release();
+    await c.wait("welcome");
+    expect(await c.wait("pong")).toEqual({ type: "pong", time: 123 });
+    expect(runtime.game.players.size).toBe(1);
+  });
+  it("rolls back an active session when its login save fails", async () => {
+    vi.spyOn(runtime.game, "save").mockRejectedValueOnce(Error("Disk failure"));
+    const c = connect();
+    await c.open();
+    c.send({
+      type: "hello",
+      protocol: PROTOCOL_VERSION,
+      generator: GENERATOR_VERSION,
+      name: "Failed",
+    });
+    const error = await c.wait("error");
+    expect(error.fatal).toBe(true);
+    expect(runtime.game.players.size).toBe(0);
+    expect(c.messages.some((m) => m.type === "welcome")).toBe(false);
+  });
+  it("does not apply a delayed skin upload after its player disconnected", async () => {
+    const c = connect(),
+      welcome = await c.hello("Skin");
+    const record = runtime.game.players.get(welcome.self.id)!.record;
+    let release!: (hash: string) => void;
+    const store = vi
+      .spyOn(runtime.skins, "store")
+      .mockImplementationOnce(() => new Promise<string>((r) => (release = r)));
+    c.send({
+      type: "skin",
+      png: "data:image/png;base64,AA==",
+      model: "slim",
+      layers: true,
+    });
+    await vi.waitFor(() => expect(store).toHaveBeenCalled());
+    await c.close();
+    release("a".repeat(64));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(record.skin).toBeUndefined();
+    expect(runtime.game.players.size).toBe(0);
+  });
   it("automatically makes a real local connection Admin, including after deop and reconnect", async () => {
     classifyActualHost = true;
     const a = connect(),
@@ -472,6 +533,65 @@ describe("atomic inventory transactions and persistence", () => {
     game = await ServerWorld.open({ ...defaults, viewDistance: 2 }, root);
   });
   afterEach(() => game.dispose());
+  it("replays both successful and rejected acknowledgements without applying a transaction twice", () => {
+    const messages: ServerMessage[] = [],
+      p = game.join("Ack", undefined, (m) => messages.push(m)).player;
+    let mutations = 0;
+    game.transact(p, "success", () => {
+      mutations++;
+      p.survival.add(113, 1);
+    });
+    game.transact(p, "success", () => {
+      mutations++;
+      p.survival.add(113, 1);
+    });
+    game.transact(p, "failure", () => {
+      throw Error("Full");
+    });
+    game.transact(p, "failure", () => {
+      mutations++;
+    });
+    expect(mutations).toBe(1);
+    expect(p.survival.count(113)).toBe(1);
+    expect(messages.filter((m) => m.type === "ack")).toEqual([
+      { type: "ack", tx: "success", ok: true },
+      { type: "ack", tx: "success", ok: true },
+      { type: "ack", tx: "failure", ok: false, message: "Full" },
+      { type: "ack", tx: "failure", ok: false, message: "Full" },
+    ]);
+  });
+  it("never processes movement sequence numbers backwards", () => {
+    const p = game.join("Move", undefined, () => {}).player;
+    for (const seq of [3, 2, 1, 3, 4])
+      game.handle(p, {
+        type: "input",
+        input: { seq, keys: [], yaw: 0, pitch: 0, flying: false },
+      });
+    expect(p.queued.map((i) => i.seq)).toEqual([3, 4]);
+    game.step();
+    expect(p.ack).toBe(3);
+    game.step();
+    expect(p.ack).toBe(4);
+  });
+  it("emits runtime-valid chunks, snapshots, inventory and entity state", () => {
+    const messages: ServerMessage[] = [],
+      joined = game.join("Validate", undefined, (m) => messages.push(m));
+    game.mobs.spawn("cow", 8, 70, 8);
+    game.drop(113, 1, [8, 70, 8]);
+    game.step();
+    game.step();
+    messages.push({
+      type: "welcome",
+      token: joined.token,
+      sessionId: joined.player.sessionId,
+      serverId: game.serverId,
+      viewDistance: game.config.viewDistance,
+      world: game.welcomeWorld(),
+      self: game.self(joined.player),
+    });
+    for (const message of messages)
+      expect(() => validateServerMessage(message), message.type).not.toThrow();
+  });
   it.each([
     ["survival", "survival"],
     ["creative", "creative"],

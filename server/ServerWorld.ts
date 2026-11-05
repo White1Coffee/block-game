@@ -19,7 +19,7 @@ import {
   stackLimit,
 } from "../src/inventory/ItemRegistry";
 import { craftGrid } from "../src/inventory/RecipeRegistry";
-import { BlockEntities, smelting } from "../src/world/BlockEntities";
+import { BlockEntities, smelting, isFuel } from "../src/world/BlockEntities";
 import {
   BlockInteractionSystem,
   placementPosition,
@@ -85,7 +85,7 @@ export interface ServerPlayer {
   lastInput: number;
   queued: MovementInput[];
   selected: number;
-  transactions: Set<string>;
+  transactions: Map<string, Extract<ServerMessage, { type: "ack" }>>;
   chunks: Set<string>;
   chunkQueue: string[];
   mineKey: string;
@@ -216,9 +216,37 @@ export class ServerWorld {
       this.deltas.push({ type: "block", key, revision, change });
     });
   }
-  static async open(config: ServerConfig, root?: string) {
+  static async open(config: ServerConfig, root?: string, lock = false) {
     const store = new WorldPersistence<LANSave>(config.worldName, root);
-    return new ServerWorld(config, store, await store.load());
+    if (lock) await store.acquireLock();
+    try {
+      const saved = await store.load((value) => {
+        if (!value || typeof value !== "object") return false;
+        const s = value as LANSave;
+        return (
+          Number.isInteger(s.schemaVersion) &&
+          typeof s.serverId === "string" &&
+          !!s.world &&
+          typeof s.world.seed === "string" &&
+          Array.isArray(s.world.changes) &&
+          Array.isArray(s.players) &&
+          Array.isArray(s.operators) &&
+          !!s.revisions &&
+          typeof s.revisions === "object"
+        );
+      });
+      if (saved && saved.schemaVersion < 2)
+        await store.backupBeforeMigration(`lan-v${saved.schemaVersion}`, saved);
+      if (saved && (saved.world.schemaVersion ?? 0) < 5)
+        await store.backupBeforeMigration(
+          `world-v${saved.world.schemaVersion ?? 0}`,
+          saved,
+        );
+      return new ServerWorld(config, store, saved);
+    } catch (error) {
+      if (lock) await store.releaseLock();
+      throw error;
+    }
   }
   join(name: string, token: string | undefined, send: ServerPlayer["send"]) {
     if (this.players.size >= this.config.maxPlayers)
@@ -282,7 +310,7 @@ export class ServerWorld {
       lastInput: Date.now(),
       queued: [],
       selected: 0,
-      transactions: new Set(),
+      transactions: new Map(),
       chunks: new Set(),
       chunkQueue: [],
       mineKey: "",
@@ -414,21 +442,27 @@ export class ServerWorld {
     );
   }
   transact(p: ServerPlayer, tx: string, fn: () => void) {
-    if (p.transactions.has(tx)) return;
-    p.transactions.add(tx);
-    if (p.transactions.size > 512)
-      p.transactions.delete(p.transactions.values().next().value!);
+    const previous = p.transactions.get(tx);
+    if (previous) {
+      p.send(previous);
+      return;
+    }
+    let ack: Extract<ServerMessage, { type: "ack" }>;
     try {
       fn();
-      p.send({ type: "ack", tx, ok: true });
+      ack = { type: "ack", tx, ok: true };
     } catch (e) {
-      p.send({
+      ack = {
         type: "ack",
         tx,
         ok: false,
         message: e instanceof Error ? e.message : "Actie geweigerd.",
-      });
+      };
     }
+    p.transactions.set(tx, ack);
+    if (p.transactions.size > 2048)
+      p.transactions.delete(p.transactions.keys().next().value!);
+    p.send(ack);
   }
   handle(p: ServerPlayer, m: ClientMessage) {
     if (m.type === "inventory") {
@@ -488,7 +522,7 @@ export class ServerWorld {
         return;
       }
       if (
-        m.input.seq <= p.ack ||
+        m.input.seq <= Math.max(p.ack, p.queued.at(-1)?.seq ?? 0) ||
         m.input.seq > p.ack + 200 ||
         p.queued.some((q) => q.seq === m.input.seq)
       )
@@ -553,6 +587,7 @@ export class ServerWorld {
           }
         } else if (
           !(f && m.slot === 2) &&
+          !(f && m.slot === 1 && !isFuel(m.item)) &&
           !(f && m.slot === 0 && !smelting[m.item])
         )
           ok = this.entities.transferTo(
@@ -1049,9 +1084,12 @@ export class ServerWorld {
   }
   sendChunk(p: ServerPlayer, key: string, full = false) {
     const [cx, cz] = key.split(",").map(Number),
-      changes = [...this.world.changes.values()]
-        .filter((c) => keyOf(c.x, c.z) === key)
-        .map((c) => [c.x - cx * 16, c.y, c.z - cz * 16, c.id]);
+      changes = [...this.world.chunkChanges(cx, cz)].map((c) => [
+        c.x - cx * 16,
+        c.y,
+        c.z - cz * 16,
+        c.id,
+      ]);
     const states = Object.fromEntries(
       Object.entries(this.world.states).filter(([k]) => {
         const [x, , z] = k.split(",").map(Number);
@@ -1298,6 +1336,7 @@ export class ServerWorld {
           this.world.chunks.delete(key);
       }
       this.lighting.trim();
+      for (const key of this.world.dirty) this.world.dirty.delete(key);
     }
     this.tickMs = performance.now() - start;
   }

@@ -4,11 +4,23 @@ export function validateUsername(name) {
   return /^[A-Za-z0-9_]{3,16}$/.test(name);
 }
 async function upstream(url, binary = false) {
-  const r = await fetch(url, {
-    signal: AbortSignal.timeout(12000),
-    redirect: "error",
-    headers: { "User-Agent": "WhiteBrick/0.3 (public skin lookup)" },
-  });
+  let r;
+  try {
+    r = await fetch(url, {
+      signal: AbortSignal.timeout(12000),
+      redirect: "error",
+      headers: { "User-Agent": "WhiteBrick/0.6.1 (public skin lookup)" },
+    });
+  } catch (error) {
+    if (error.name === "TimeoutError") throw error;
+    throw Object.assign(
+      new Error(
+        "De publieke skinservice is niet bereikbaar. PNG-upload blijft beschikbaar.",
+        { cause: error },
+      ),
+      { status: 502 },
+    );
+  }
   if (!r.ok || r.status === 204) {
     const error = new Error(
       r.status === 429

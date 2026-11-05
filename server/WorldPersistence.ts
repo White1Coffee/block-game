@@ -36,16 +36,23 @@ export class WorldPersistence<T> {
       throw Error("Ongeldige wereldnaam.");
     this.directory = resolve(root, worldName);
   }
-  async load(): Promise<T | undefined> {
+  async load(
+    validate: (value: unknown) => boolean = () => true,
+  ): Promise<T | undefined> {
+    const parse = (text: string) => {
+      const value: unknown = JSON.parse(text);
+      if (!validate(value)) throw Error("Ongeldige savestructuur.");
+      return value as T;
+    };
     try {
-      return JSON.parse(
+      return parse(
         await readFile(resolve(this.directory, "world.json"), "utf8"),
-      ) as T;
+      );
     } catch (e) {
       try {
-        const data = JSON.parse(
+        const data = parse(
           await readFile(resolve(this.directory, "world.backup.json"), "utf8"),
-        ) as T;
+        );
         console.warn("Hoofdsave onleesbaar; back-up hersteld.");
         this.recovered = true;
         return data;
@@ -60,6 +67,27 @@ export class WorldPersistence<T> {
         );
       }
     }
+  }
+  async backupBeforeMigration(label: string, value: T) {
+    if (!/^[a-z0-9-]{1,48}$/.test(label)) throw Error("Ongeldig back-uplabel.");
+    await mkdir(this.directory, { recursive: true });
+    const file = resolve(this.directory, `world.before-${label}.json`);
+    let handle;
+    try {
+      handle = await open(file, "wx");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+      throw error;
+    }
+    try {
+      await handle.writeFile(JSON.stringify(value));
+      await handle.sync();
+    } catch (error) {
+      await handle.close();
+      await unlink(file);
+      throw error;
+    }
+    await handle.close();
   }
   async acquireLock() {
     await mkdir(this.directory, { recursive: true });

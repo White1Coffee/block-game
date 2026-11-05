@@ -337,9 +337,29 @@ try {
       (m) => m.type === "chat" && m.text.includes("Alice heeft"),
     ),
   );
+  // Close propagation is asynchronous; old leave messages may be present after reconnects.
+  for (let i = 0; i < 100; i++) {
+    if (
+      (await fetch(url + "/api/server/status").then((r) => r.json()))
+        .playerCount === 1
+    )
+      break;
+    await delay(50);
+  }
   assert.equal(
     (await fetch(url + "/api/server/status").then((r) => r.json())).playerCount,
     1,
+    logs +
+      "\n" +
+      JSON.stringify(
+        await b.evaluate(() =>
+          window.lanMessages
+            .filter((m) => ["chat", "error", "welcome"].includes(m.type))
+            .map((m) =>
+              m.type === "welcome" ? { type: m.type, id: m.self.id } : m,
+            ),
+        ),
+      ),
   );
   await stop();
   await b.waitForFunction(() =>

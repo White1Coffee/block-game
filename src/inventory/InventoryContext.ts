@@ -1,5 +1,5 @@
 import type { Survival } from "./Survival";
-import { smelting, type BlockEntities } from "../world/BlockEntities";
+import { smelting, isFuel, type BlockEntities } from "../world/BlockEntities";
 import type { InventoryContext as Context } from "./InventoryTransactions";
 import type { ItemStack } from "./SlotInventory";
 export function inventoryContext(
@@ -19,7 +19,8 @@ export function inventoryContext(
         ? entities.chest(station.key)
         : undefined,
     canInsert: (index, stack) =>
-      !f || (index !== 2 && (index !== 0 || !!smelting[stack.id])),
+      !f ||
+      (index === 0 ? !!smelting[stack.id] : index === 1 && isFuel(stack.id)),
     onOutput: () => {},
     drop,
   };
