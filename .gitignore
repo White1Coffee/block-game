@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.vite/
+test-results/
+.npm-cache/
+.browser-test/
+server/data/
+.lan-test/

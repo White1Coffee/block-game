@@ -1,0 +1,6 @@
+{
+ "serverName":"WhiteBrick LAN","host":"0.0.0.0","port":8800,"maxPlayers":8,
+ "worldName":"MultiplayerWorld","seed":"WhiteBrick-LAN","defaultMode":"creative",
+ "viewDistance":4,"simulationDistance":3,"pvpEnabled":false,"allowCommands":true,
+ "autosaveIntervalSeconds":60,"adminIds":[],"playerCommands":["help"]
+}
